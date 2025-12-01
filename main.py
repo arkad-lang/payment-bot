@@ -1,21 +1,17 @@
-# main.py
+# main.py (для Railway — polling)
 import os
 import json
 import logging
 from datetime import datetime, timedelta
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
 
 # === CONFIG ===
 TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "") + WEBHOOK_PATH
+# Убираем webhook — используем polling
 
 # === PAYMENTS (взято строго из ваших файлов) ===
 PAYMENTS = [
@@ -80,7 +76,6 @@ def parse_date(s):
 # === BOT INIT ===
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
 # === COMMANDS ===
 @dp.message(Command("start"))
@@ -152,53 +147,41 @@ async def cmd_paid(message: types.Message):
         await message.answer("❌ Используйте: /paid ДД.ММ или /paid ДД.ММ.ГГ")
 
 # === NOTIFICATIONS ===
+import asyncio
+
 async def send_reminders():
-    today = datetime.now().date()
-    for p in PAYMENTS:
-        if p["paid"]:
-            continue
-        d = parse_date(p["date"])
-        days_left = (d - today).days
-        if days_left in [3, 1, 0]:
-            warn = "❗❗❗" if days_left == 0 else "❗"
-            text = f"{warn} <b>Напоминание:</b>\n📅 {p['date']}\n→ {p['org']}\n→ <b>{p['sum']:,.2f} ₽</b>"
-            if days_left == 0:
-                text += "\n\n🔴 <b>Сегодня последний день оплаты!</b>"
-            try:
-                # Замените на ваш chat_id (напишите /start боту и получите его)
-                await bot.send_message(chat_id=os.getenv("ADMIN_CHAT_ID", "0"), text=text, parse_mode=ParseMode.HTML)
-            except Exception as e:
-                logging.error(f"Failed to send to {os.getenv('ADMIN_CHAT_ID')}: {e}")
-
-# === WEBHOOK SETUP ===
-async def on_startup(app: web.Application):
-    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
-    scheduler.add_job(send_reminders, "cron", hour=10, minute=0, id="daily_reminder")
-    scheduler.start()
-    logging.info("Bot started. Webhook set.")
-
-async def on_shutdown(app: web.Application):
-    scheduler.shutdown()
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.session.close()
+    while True:
+        await asyncio.sleep(3600)  # Проверка каждые час
+        today = datetime.now().date()
+        for p in PAYMENTS:
+            if p["paid"]:
+                continue
+            d = parse_date(p["date"])
+            days_left = (d - today).days
+            if days_left in [3, 1, 0]:
+                warn = "❗❗❗" if days_left == 0 else "❗"
+                text = f"{warn} <b>Напоминание:</b>\n📅 {p['date']}\n→ {p['org']}\n→ <b>{p['sum']:,.2f} ₽</b>"
+                if days_left == 0:
+                    text += "\n\n🔴 <b>Сегодня последний день оплаты!</b>"
+                try:
+                    # Замените на ваш chat_id (напишите /start боту и получите его)
+                    await bot.send_message(chat_id="123456789", text=text, parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    logging.error(f"Failed to send: {e}")
 
 # === MAIN ===
 if __name__ == "__main__":
     import asyncio
     logging.basicConfig(level=logging.INFO)
 
-    # Получите ADMIN_CHAT_ID: напишите боту /start → скопируйте chat.id из лога
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_plan, Command("plan"))
     dp.message.register(cmd_all, Command("all"))
     dp.message.register(cmd_paid, Command("paid"))
 
-    app = web.Application()
-    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-    webhook_handler.register(app, path=WEBHOOK_PATH)
-    setup_application(app, dp, bot=bot)
+    # Запуск напоминаний в фоне
+    loop = asyncio.get_event_loop()
+    loop.create_task(send_reminders())
 
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-
-    web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    # Запуск бота в режиме polling
+    loop.run_until_complete(dp.start_polling(bot))
